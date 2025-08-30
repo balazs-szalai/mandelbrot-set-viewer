@@ -8,4 +8,5 @@ You just have to install it using pip:
 And you can run it from the commandline using:
 	
 	mandelbrot-viewer
-This will execute the main function from mandelbrot_viewer.mandelbrot_viewer.main.py.
+
+This will execute the main function from mandelbrot_viewer.mandelbrot_viewer_main.py.
