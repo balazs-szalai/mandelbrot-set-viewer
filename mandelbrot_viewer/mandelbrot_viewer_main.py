@@ -39,17 +39,19 @@ import sys
 from random import randint
 
 import os
-path = '\\'.join(__file__.split('\\')[:-1])
-path = os.path.join(path, 'ti_bigfloat_compute_server.py')
+path_base = '\\'.join(__file__.split('\\')[:-1])
+path = os.path.join(path_base, 'ti_bigfloat_compute_server.py')
+
+startupinfo = None
+creationflags = 0
+if os.name == "nt":
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    creationflags = subprocess.CREATE_NO_WINDOW
 
 cmap = matplotlib.colormaps['viridis']
-ranges = [3, 5]
+ranges = [2, 5]
 curr_max_n = [ranges[1]]
-
-try:
-    ti.init(ti.gpu)
-except:
-    ti.init()
 
 ADDRESS = ('localhost', 6011)
 authkey = b'secretpassword'
@@ -62,10 +64,19 @@ server_ask_threads = []
 connections = []
 server_subprocess_threads = []
 
+# with open(os.path.join(path_base, 'mandelbrot_log.txt'), 'w') as f:
+#     pass
+
+# def print(*args):
+#     s = ' '.join([str(i) for i in args])
+#     with open(os.path.join(path_base, 'mandelbrot_log.txt'), 'a') as f:
+#         f.write(s+'\n')
+
 def ask_server_started(conn, i):
     msg = conn.recv()
     if msg == 'started':
         has_started[i] = True
+        print(f"received started form {i}")
     else:
         raise RuntimeError(f"didn't get 'started' response from server {i}")
     
@@ -73,7 +84,7 @@ def ask_server_started(conn, i):
 flag = [True]
 def wait_connections():
     while flag[0]:
-        conn = listener.accept()
+        conn = listener[0].accept()
         connections.append(conn)
         do_sync.append(False)
         synced.append(False)
@@ -90,23 +101,24 @@ def stop_wait():
 
 def pipe_reader(proc):
     for line in proc.stdout:
-        sys.stdout.write(line)
+        print(line, end='')
         if line.startswith('compute_progress'):
             _, curr, _, full = line.split()
             r = float(curr)/float(full)
-            app.update_progress(r)
+            app[0].update_progress(r)
 
 def start_servers():
     for i in range(ranges[0], ranges[1]):
-        p = subprocess.Popen(['python', '-u', path, str(i)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)#, creationflags=subprocess.CREATE_NEW_CONSOLE)#
+        p = subprocess.Popen([sys.executable, '-u', path, str(i), arch[0]], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, startupinfo=startupinfo, creationflags=creationflags)#, creationflags=subprocess.CREATE_NEW_CONSOLE)#
         subprocesses.append(p)
-        ts = thr.Thread(target=pipe_reader, args=(p, ))
+        ts = thr.Thread(target=pipe_reader, args=(p, ), daemon=True)
         ts.start()
         server_subprocess_threads.append(ts)
-        sleep(2)
+        sleep(0.2)
 
 def compute(f, x0, y0, x1, y1, m, n, img, iter_depth):
     if f == compute64:
+        print('compute64 branch')
         return compute64(float(x0), float(y0), float(x1), float(y1), m, n, img, iter_depth)
     else:
         i = f - ranges[0]
@@ -123,16 +135,26 @@ def choose_compute(x0, x1, y0, y1, m, n):
     
     bits = -s.log(eps, 10)*10/3 # 2**10 = 1024 \approx 1000 = 10**3
     
-    print(float(eps), float(bits))
+    print(float(eps), float(bits))        
     
+    if bits < 53 and sum(has_started) == 0:
+        return compute64
+    
+    has_started_ = []
+    if sum(has_started) > 0:
+        i = 0
+        while i < len(has_started) and has_started[i]:
+            has_started_.append(True)
+            i += 1
+    print(has_started, has_started_)
     if bits < 53:
-        return compute64 
-    for i in range(ranges[0], ranges[0]+sum(has_started)):#curr_max_n[0]):
+        return ranges[0]
+    for i in range(ranges[0], ranges[0]+sum(has_started_)):#curr_max_n[0]):
         if bits < (i-1)*32:
             print(i)
             return i
     if has_started[0]:
-        return ranges[0]+sum(has_started)-1
+        return ranges[0]+sum(has_started_)-1
     else:
         return compute64
 
@@ -512,10 +534,10 @@ class InteractiveCanvas(Widget):
             if not do_sync[i]:
                 do_sync[i] = True
                 
-                p = subprocess.Popen(['python', '-u', path, str(curr_max_n[0])], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)#, creationflags=subprocess.CREATE_NEW_CONSOLE)#
+                p = subprocess.Popen([sys.executable, '-u', path, str(curr_max_n[0]), arch[0]], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, startupinfo=startupinfo, creationflags=creationflags)#, creationflags=subprocess.CREATE_NEW_CONSOLE)#
                 subprocesses.append(p)
                 
-                ts = thr.Thread(target=pipe_reader, args=(p, ))
+                ts = thr.Thread(target=pipe_reader, args=(p, ), daemon=True)
                 ts.start()
                 server_subprocess_threads.append(ts)
                 
@@ -686,10 +708,26 @@ class Mandelbrotwiever(App):
         self.root.ids.progbar_txt.text = f"Progress: {int(ratio * 100)}%"
 
 
-
+listener = []
+app = []
+arch = []
 def main():
+    if len(sys.argv) > 1:
+        arch0 = sys.argv[1]
+    else:
+        arch0 = 'cuda'
+    
+    if arch0 == 'cuda':
+        arch.append('cuda')
+    else:
+        arch.append('cpu')
+    
     try:
-        listener = Listener(ADDRESS, authkey=authkey)
+        ti.init(ti.cuda)
+    except:
+        ti.init()
+    try:
+        listener.append(Listener(ADDRESS, authkey=authkey))
         print("Server: Waiting for connection...")
             
         
@@ -701,8 +739,8 @@ def main():
         start_servers_thr.start()
         
         
-        app = Mandelbrotwiever()
-        app.run()
+        app.append(Mandelbrotwiever())
+        app[0].run()
     
         
     finally:
@@ -710,18 +748,15 @@ def main():
             conn.close()
         
         try:
-            start_servers_thr.join()
+            start_servers_thr.join(timeout = 0.1)
         except:
             pass
         
         stop_wait()
-        listener_thr.join()
-        listener.close()
+        listener_thr.join(timeout = 0.1)
+        listener[0].close()
         
         for sa in server_ask_threads:
-            sa.join()
+            sa.join(timeout = 0.1)
         
-        
-        for ts in server_ask_threads:
-            ts.join()
 
