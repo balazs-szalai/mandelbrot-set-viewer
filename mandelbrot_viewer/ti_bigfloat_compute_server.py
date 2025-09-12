@@ -172,7 +172,7 @@ with Client(ADDRESS, authkey=authkey) as conn:
         
         command = msg.strip().split()[0]
         
-        print(f"Server {N}: recieved: {command}")
+        print(f"Server {N}: received: {command}")
         
         if command == 'allocate':
             _, name, m, n = msg.strip().split()
@@ -191,7 +191,7 @@ with Client(ADDRESS, authkey=authkey) as conn:
                 gc.collect()
                 safe_cleanup(shm)
             except Exception as e:
-                print(e)
+                print(f"Server {N}: deallocate failed: {e}")
             conn.send('okay')
             
             print(f'Server {N}: deallocated img and freed shm')
@@ -225,7 +225,7 @@ with Client(ADDRESS, authkey=authkey) as conn:
                 shm.buf[4*m*n] = 0
                 print(f'Server {N}: Estimated time: {time_estimate:.2f} s, Wall time: {t1-t0:.2f} s')
             except Exception as e:
-                print(e)
+                print(f"Server {N}: compute failed: {e}")
                 
             conn.send('okay')
             

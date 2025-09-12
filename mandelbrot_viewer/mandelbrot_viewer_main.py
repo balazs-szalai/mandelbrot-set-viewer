@@ -20,6 +20,7 @@ import kivy
 from mandelbrot_viewer.shared_memory_handler import create_shared_memory, safe_cleanup
 from multiprocessing.connection import Listener, Client
 import gc
+import cv2
 
 import sympy as s
 
@@ -54,6 +55,7 @@ ranges = [2, 5]
 curr_max_n = [ranges[1]]
 
 ADDRESS = ('localhost', 6011)
+SSH_ADDRESS = ('localhost', 6010)
 authkey = b'secretpassword'
 name = f'shared_buffer_{randint(0, 1000)}'
 do_sync = []
@@ -89,6 +91,7 @@ def wait_connections():
         do_sync.append(False)
         synced.append(False)
         has_started.append(False)
+        # print(has_started)
         
         t = thr.Thread(target=ask_server_started, args = (conn, len(has_started)-1))
         t.start()
@@ -100,15 +103,26 @@ def stop_wait():
         pass
 
 def pipe_reader(proc):
-    for line in proc.stdout:
-        print(line, end='')
-        if line.startswith('compute_progress'):
-            _, curr, _, full = line.split()
-            r = float(curr)/float(full)
-            app[0].update_progress(r)
+    if not server[0]:
+        for line in proc.stdout:
+            print(line, end='')
+            if line.startswith('compute_progress'):
+                _, curr, _, full = line.split()
+                r = float(curr)/float(full)
+                app[0].update_progress(r)
+    else:
+        while True:
+            line = ssh_client[2].recv()
+            ssh_client[2].send('okay')
+            print(line, end='')
+            if line.startswith('compute_progress'):
+                _, curr, _, full = line.split()
+                r = float(curr)/float(full)
+                app[0].update_progress(r)
 
 def start_servers():
     for i in range(ranges[0], ranges[1]):
+        print(f'start servers: {i}')
         p = subprocess.Popen([sys.executable, '-u', path, str(i), arch[0]], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, startupinfo=startupinfo, creationflags=creationflags)#, creationflags=subprocess.CREATE_NEW_CONSOLE)#
         subprocesses.append(p)
         ts = thr.Thread(target=pipe_reader, args=(p, ), daemon=True)
@@ -120,6 +134,14 @@ def compute(f, x0, y0, x1, y1, m, n, img, iter_depth):
     if f == compute64:
         print('compute64 branch')
         return compute64(float(x0), float(y0), float(x1), float(y1), m, n, img, iter_depth)
+    elif server[0]:
+        print(f'sending: compute {str(x0.evalf(f*10))} {str(y0.evalf(f*10))} {str(x1.evalf(f*10))} {str(y1.evalf(f*10))} {m} {n} {iter_depth}')
+        ssh_client[0].send(f'compute {str(x0.evalf(f*10))} {str(y0.evalf(f*10))} {str(x1.evalf(f*10))} {str(y1.evalf(f*10))} {m} {n} {iter_depth}')
+        print('sent, receiving image...')
+        encoded = ssh_client[1].recv()
+        print(encoded)
+        img[:, :] = cv2.imdecode(encoded, cv2.IMREAD_GRAYSCALE).astype(np.float32)/(2**8-1)
+        print(img[0,0], img.shape, img.dtype)
     else:
         i = f - ranges[0]
         connections[i].send(f'compute {str(x0.evalf(f*10))} {str(y0.evalf(f*10))} {str(x1.evalf(f*10))} {str(y1.evalf(f*10))} {m} {n} {iter_depth}')
@@ -128,48 +150,72 @@ def compute(f, x0, y0, x1, y1, m, n, img, iter_depth):
             return
 
 def choose_compute(x0, x1, y0, y1, m, n):
-    dx = (x1 - x0)/m
-    dy = (y1 - y0)/n 
-    
-    eps = min(dx, dy)
-    
-    bits = -s.log(eps, 10)*10/3 # 2**10 = 1024 \approx 1000 = 10**3
-    
-    print(float(eps), float(bits))        
-    
-    if bits < 53 and sum(has_started) == 0:
-        return compute64
-    
-    has_started_ = []
-    if sum(has_started) > 0:
-        i = 0
-        while i < len(has_started) and has_started[i]:
-            has_started_.append(True)
-            i += 1
-    print(has_started, has_started_)
-    if bits < 53:
-        return ranges[0]
-    for i in range(ranges[0], ranges[0]+sum(has_started_)):#curr_max_n[0]):
-        if bits < (i-1)*32:
-            print(i)
-            return i
-    if has_started[0]:
-        return ranges[0]+sum(has_started_)-1
+    if not server[0]:
+        # print(has_started)
+        dx = (x1 - x0)/m
+        dy = (y1 - y0)/n 
+        
+        eps = min(dx, dy)
+        
+        bits = -s.log(eps, 10)*10/3 # 2**10 = 1024 \approx 1000 = 10**3
+        
+        # print(float(eps), float(bits))        
+        
+        if bits < 53 and sum(has_started) == 0:
+            return compute64
+        
+        has_started_ = []
+        if sum(has_started) > 0:
+            i = 0
+            while i < len(has_started) and has_started[i]:
+                has_started_.append(True)
+                i += 1
+        # print(has_started, has_started_)
+        if bits < 53:
+            return ranges[0]
+        for i in range(ranges[0], ranges[0]+sum(has_started_)):#curr_max_n[0]):
+            if bits < (i-1)*32:
+                # print(i)
+                return i
+        if has_started[0]:
+            return ranges[0]+sum(has_started_)-1
+        else:
+            return compute64
     else:
-        return compute64
+        dx = (x1 - x0)/m
+        dy = (y1 - y0)/n 
+        
+        eps = min(dx, dy)
+        
+        bits = -s.log(eps, 10)*10/3 # 2**10 = 1024 \approx 1000 = 10**3
+        
+        # print(float(eps), float(bits))        
+        
+        if bits < 53:
+            return ranges[0]
+        i = ranges[0]
+        while bits > (i-1)*32:
+            i += 1
+        return i
+        
 
 def allocate_img(shape):
-    size = 4*shape[0]*shape[1]
-    shm = create_shared_memory(name, size)
-    
-    for i in range(len(connections)):
-        if do_sync[i] and has_started[i]:
-            connections[i].send(f'allocate {name} {shape[0]} {shape[1]}')
-            msg = connections[i].recv()
-            
-            synced[i] = True
+    shm = None
+    if server[0]:
+        ssh_client[0].send(f'allocate {name} {shape[0]} {shape[1]}')
+        msg = ssh_client[0].recv()
+        img = np.zeros(shape, np.float32)
+    else:
+        size = 4*shape[0]*shape[1]
+        shm = create_shared_memory(name, size)
+        for i in range(len(connections)):
+            if do_sync[i] and has_started[i]:
+                connections[i].send(f'allocate {name} {shape[0]} {shape[1]}')
+                msg = connections[i].recv()
+                
+                synced[i] = True
         
-    img = np.frombuffer(shm.buf, np.float32, shape[0]*shape[1]).reshape(shape)
+        img = np.frombuffer(shm.buf, np.float32, shape[0]*shape[1]).reshape(shape)
     
     return shm, img
 
@@ -177,13 +223,18 @@ def deallocate_img(self):
     shm = self.shm
     self.img = None
     gc.collect()
-    for i in range(len(connections)):
-        if synced[i]:
-            connections[i].send('deallocate')
-            msg = connections[i].recv()
-            synced[i] = False
+    
+    if server[0]:
+        ssh_client[0].send('deallocate')
+        msg = ssh_client[0].recv()
+    else:
+        for i in range(len(connections)):
+            if synced[i]:
+                connections[i].send('deallocate')
+                msg = connections[i].recv()
+                synced[i] = False
             
-    safe_cleanup(shm)
+        safe_cleanup(shm)
     
 
 class APTransform:
@@ -359,9 +410,14 @@ class InteractiveCanvas(Widget):
             self.next_texture_ready = False   
         
         if self.schedule_compute and not self.server_busy and self.server_ready:
-            self.compute_args = self.on_transform_work(self, self.transform)
-            self.launch_compute()
-            self.schedule_compute = False
+            if not self.reallocate_finished:
+                print('ask_reallocate from compute schedule')
+                self.ask_reallocate = True
+            else:
+                print('compute schedule launched normally')
+                self.compute_args = self.on_transform_work(self, self.transform)
+                self.launch_compute()
+                self.schedule_compute = False
         
         self.t1 = perf_counter()
         diff = self.t1-self.t2
@@ -529,7 +585,7 @@ class InteractiveCanvas(Widget):
         self.zoom = str(value.mat[0].evalf(5))
         
         f = choose_compute(x0, x1, y0, y1, self.m, self.n)
-        if f != compute64:
+        if f != compute64 and not server[0]:
             i = f - ranges[0]
             if not do_sync[i]:
                 do_sync[i] = True
@@ -550,6 +606,23 @@ class InteractiveCanvas(Widget):
                 
                 self.ask_reallocate = True
                 self.server_ready = False
+        elif f != compute64 and server[0]:
+            ssh_client[3].send(f'start_server {f} {curr_max_n[0]} {arch[0]}')
+            msg = ssh_client[3].recv()
+            
+            if msg == 'new':
+                print(f'new compute srever started {f} {curr_max_n[0]} {arch[0]}')
+                self.transform.mat @= s.Matrix([[s.Float(1, dps = int(f*10)), 0, 0, 0],
+                                                [0, s.Float(1, dps = int(f*10)), 0, 0],
+                                                [0, 0, s.Float(1, dps = int(f*10)), 0],
+                                                [0, 0, 0, s.Float(1, dps = int(f*10))]])
+                
+                curr_max_n[0] += 1
+                
+                
+                self.ask_reallocate = True
+                self.server_ready = False
+                
         if self.needs_update():
             self.schedule_compute = True
         self.force_update = False
@@ -697,11 +770,14 @@ class Mandelbrotwiever(App):
         print('##################################################################')
     
     def interrupt(self):
-        try:
-            canvas = self.root.ids.interactive_canvas
-            canvas.shm.buf[canvas.img.nbytes] = 1 
-        except Exception as e:
-            print(e)
+        if server[0]:
+            ssh_client[4].send('interrupt')
+        else:
+            try:
+                canvas = self.root.ids.interactive_canvas
+                canvas.shm.buf[canvas.img.nbytes] = 1 
+            except Exception as e:
+                print(e)
     
     def update_progress(self, ratio):
         self.root.ids.progbar.value = ratio * 100
@@ -709,13 +785,20 @@ class Mandelbrotwiever(App):
 
 
 listener = []
+ssh_client = []
 app = []
 arch = []
+server = [False]
 def main():
-    if len(sys.argv) > 1:
-        arch0 = sys.argv[1]
+    if len(sys.argv) > 2:
+        arch0 = sys.argv[2]
     else:
         arch0 = 'cuda'
+    
+    if len(sys.argv) > 1:
+        if sys.argv[1] == 'server':
+            server[0] = True
+            
     
     if arch0 == 'cuda':
         arch.append('cuda')
@@ -723,40 +806,66 @@ def main():
         arch.append('cpu')
     
     try:
-        ti.init(ti.cuda)
+        if arch0 == 'cuda':
+            ti.init(ti.cuda)
+        else:
+            ti.init(ti.cpu)
     except:
         ti.init()
-    try:
-        listener.append(Listener(ADDRESS, authkey=authkey))
-        print("Server: Waiting for connection...")
-            
-        
-        listener_thr = thr.Thread(target=wait_connections)
-        listener_thr.start()
-        
-        
-        start_servers_thr = thr.Thread(target=start_servers)
-        start_servers_thr.start()
-        
-        
-        app.append(Mandelbrotwiever())
-        app[0].run()
     
-        
-    finally:
-        for conn in connections:
-            conn.close()
-        
+    if not server[0]:
+        print('local')
         try:
-            start_servers_thr.join(timeout = 0.1)
-        except:
-            pass
-        
-        stop_wait()
-        listener_thr.join(timeout = 0.1)
-        listener[0].close()
-        
-        for sa in server_ask_threads:
-            sa.join(timeout = 0.1)
-        
+            listener.append(Listener(ADDRESS, authkey=authkey))
+            print("Server: Waiting for connection...")
+                
+            
+            listener_thr = thr.Thread(target=wait_connections)
+            listener_thr.start()
+            
+            start_servers_thr = thr.Thread(target=start_servers)
+            start_servers_thr.start()   
+            
+            app.append(Mandelbrotwiever())
+            app[0].run()
+            
+        finally:
+            for conn in connections:
+                conn.close()
+            
+            try:
+                start_servers_thr.join(timeout = 0.1)
+            except:
+                pass
+            
+            stop_wait()
+            listener_thr.join(timeout = 0.1)
+            listener[0].close()
+            
+            for sa in server_ask_threads:
+                sa.join(timeout = 0.1)
+    else:
+        print('server')
+        try:
+            ssh_client.append(Client(SSH_ADDRESS)) #conn
+            ssh_client.append(Client(SSH_ADDRESS)) #conn_img
+            ssh_client.append(Client(SSH_ADDRESS)) #conn_stdout
+            ssh_client.append(Client(SSH_ADDRESS)) #conn_start_servers
+            ssh_client.append(Client(SSH_ADDRESS)) #conn_interrupt
+            
+            thr.Thread(target=pipe_reader, args=(None, ), daemon=True).start()
+            
+            app.append(Mandelbrotwiever())
+            app[0].run()
+        finally:
+            ssh_client[0].send('cleanup')
+            
+            ssh_client[0].close()
+            ssh_client[1].close()
+            ssh_client[2].close()
+            ssh_client[3].close()
+            ssh_client[4].close()
 
+if __name__ == '__main__':
+    sys.argv = ['', 'server']
+    main()
